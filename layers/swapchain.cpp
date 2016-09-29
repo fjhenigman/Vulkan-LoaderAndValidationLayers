@@ -1841,15 +1841,6 @@ static bool validateCreateSwapchainKHR(VkDevice device, const VkSwapchainCreateI
                     sharingModeStr(pCreateInfo->imageSharingMode));
     }
 
-    // Validate pCreateInfo->clipped:
-    if (pCreateInfo && (pCreateInfo->clipped != VK_FALSE) && (pCreateInfo->clipped != VK_TRUE)) {
-        skip_call |= log_msg(my_data->report_data, VK_DEBUG_REPORT_ERROR_BIT_EXT, VK_DEBUG_REPORT_OBJECT_TYPE_DEVICE_EXT,
-                             reinterpret_cast<uint64_t>(device), __LINE__, SWAPCHAIN_BAD_BOOL, swapchain_layer_name,
-                             "vkCreateSwapchainKHR() called with a VkBool32 value that is neither VK_TRUE nor VK_FALSE, but "
-                             "has the numeric value of %d.",
-                             pCreateInfo->clipped);
-    }
-
     // Validate pCreateInfo->oldSwapchain:
     if (pCreateInfo && pCreateInfo->oldSwapchain) {
         SwpSwapchain *pOldSwapchain = NULL;
