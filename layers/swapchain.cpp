@@ -1833,12 +1833,6 @@ static bool validateCreateSwapchainKHR(VkDevice device, const VkSwapchainCreateI
                                  "bad value(s) for pCreateInfo->queueFamilyIndexCount or pCreateInfo->pQueueFamilyIndices).",
                                  sharingModeStr(pCreateInfo->imageSharingMode));
         }
-    } else if (pCreateInfo->imageSharingMode != VK_SHARING_MODE_EXCLUSIVE) {
-        skip_call |=
-            log_msg(my_data->report_data, VK_DEBUG_REPORT_ERROR_BIT_EXT, VK_DEBUG_REPORT_OBJECT_TYPE_DEVICE_EXT,
-                    reinterpret_cast<uint64_t>(device), __LINE__, SWAPCHAIN_CREATE_SWAP_BAD_SHARING_MODE, swapchain_layer_name,
-                    "vkCreateSwapchainKHR() called with a non-supported pCreateInfo->imageSharingMode (i.e. %s).",
-                    sharingModeStr(pCreateInfo->imageSharingMode));
     }
 
     // Validate pCreateInfo->oldSwapchain:
