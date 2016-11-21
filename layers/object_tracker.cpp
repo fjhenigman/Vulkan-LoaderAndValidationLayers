@@ -314,9 +314,11 @@ static void DestroyObject(T1 dispatchable_object, T2 object, VkDebugReportObject
     }
 }
 
+static const int VALIDATION_ERROR_UNDEFINED = -1;
+
 template <typename T1, typename T2>
 static bool ValidateObject(T1 dispatchable_object, T2 object, VkDebugReportObjectTypeEXT object_type, bool null_allowed,
-                           int error_code = -1) {
+                           int error_code) {
     if (null_allowed && (object == VK_NULL_HANDLE)) {
         return false;
     }
@@ -327,7 +329,7 @@ static bool ValidateObject(T1 dispatchable_object, T2 object, VkDebugReportObjec
         // If object is an image, also look for it in the swapchain image map
         if ((object_type != VK_DEBUG_REPORT_OBJECT_TYPE_IMAGE_EXT) ||
             (device_data->swapchainImageMap.find(object_handle) == device_data->swapchainImageMap.end())) {
-            const char *error_msg = (error_code == -1) ? "" : validation_error_map[error_code];
+            const char *error_msg = (error_code == VALIDATION_ERROR_UNDEFINED) ? "" : validation_error_map[error_code];
             return log_msg(device_data->report_data, VK_DEBUG_REPORT_ERROR_BIT_EXT, object_type, object_handle, __LINE__,
                            error_code, LayerName, "Invalid %s Object 0x%" PRIxLEAST64 ". %s", object_name[object_type],
                            object_handle, error_msg);
@@ -1765,9 +1767,9 @@ VKAPI_ATTR VkResult VKAPI_CALL BeginCommandBuffer(VkCommandBuffer command_buffer
                 device_data->object_map[VK_DEBUG_REPORT_OBJECT_TYPE_COMMAND_BUFFER_EXT][reinterpret_cast<const uint64_t>(command_buffer)];
             if ((begin_info->pInheritanceInfo) && (pNode->status & OBJSTATUS_COMMAND_BUFFER_SECONDARY)) {
                 skip_call |= ValidateObject(command_buffer, begin_info->pInheritanceInfo->framebuffer,
-                                                           VK_DEBUG_REPORT_OBJECT_TYPE_FRAMEBUFFER_EXT, true);
+                                            VK_DEBUG_REPORT_OBJECT_TYPE_FRAMEBUFFER_EXT, true, VALIDATION_ERROR_UNDEFINED);
                 skip_call |= ValidateObject(command_buffer, begin_info->pInheritanceInfo->renderPass,
-                                                           VK_DEBUG_REPORT_OBJECT_TYPE_RENDER_PASS_EXT, true);
+                                            VK_DEBUG_REPORT_OBJECT_TYPE_RENDER_PASS_EXT, true, VALIDATION_ERROR_UNDEFINED);
             }
         }
     }
@@ -3572,7 +3574,7 @@ VKAPI_ATTR VkResult VKAPI_CALL CreateGraphicsPipelines(VkDevice device, VkPipeli
                 for (uint32_t idx1 = 0; idx1 < pCreateInfos[idx0].stageCount; ++idx1) {
                     if (pCreateInfos[idx0].pStages[idx1].module) {
                         skip_call |= ValidateObject(device, pCreateInfos[idx0].pStages[idx1].module,
-                                                    VK_DEBUG_REPORT_OBJECT_TYPE_SHADER_MODULE_EXT, false);
+                                                    VK_DEBUG_REPORT_OBJECT_TYPE_SHADER_MODULE_EXT, false, VALIDATION_ERROR_00515);
                     }
                 }
             }
@@ -3619,8 +3621,8 @@ VKAPI_ATTR VkResult VKAPI_CALL CreateComputePipelines(VkDevice device, VkPipelin
                                             false, VALIDATION_ERROR_00505);
             }
             if (pCreateInfos[idx0].stage.module) {
-                skip_call |=
-                    ValidateObject(device, pCreateInfos[idx0].stage.module, VK_DEBUG_REPORT_OBJECT_TYPE_SHADER_MODULE_EXT, false);
+                skip_call |= ValidateObject(device, pCreateInfos[idx0].stage.module, VK_DEBUG_REPORT_OBJECT_TYPE_SHADER_MODULE_EXT,
+                                            false, VALIDATION_ERROR_00515);
             }
         }
     }
