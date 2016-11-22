@@ -1765,11 +1765,12 @@ VKAPI_ATTR VkResult VKAPI_CALL BeginCommandBuffer(VkCommandBuffer command_buffer
         if (begin_info) {
             OBJTRACK_NODE *pNode =
                 device_data->object_map[VK_DEBUG_REPORT_OBJECT_TYPE_COMMAND_BUFFER_EXT][reinterpret_cast<const uint64_t>(command_buffer)];
-            if ((begin_info->pInheritanceInfo) && (pNode->status & OBJSTATUS_COMMAND_BUFFER_SECONDARY)) {
+            if ((begin_info->pInheritanceInfo) && (pNode->status & OBJSTATUS_COMMAND_BUFFER_SECONDARY) &&
+                (begin_info->flags & VK_COMMAND_BUFFER_USAGE_RENDER_PASS_CONTINUE_BIT)) {
                 skip_call |= ValidateObject(command_buffer, begin_info->pInheritanceInfo->framebuffer,
-                                            VK_DEBUG_REPORT_OBJECT_TYPE_FRAMEBUFFER_EXT, true, VALIDATION_ERROR_UNDEFINED);
+                                            VK_DEBUG_REPORT_OBJECT_TYPE_FRAMEBUFFER_EXT, true, VALIDATION_ERROR_00112);
                 skip_call |= ValidateObject(command_buffer, begin_info->pInheritanceInfo->renderPass,
-                                            VK_DEBUG_REPORT_OBJECT_TYPE_RENDER_PASS_EXT, true, VALIDATION_ERROR_UNDEFINED);
+                                            VK_DEBUG_REPORT_OBJECT_TYPE_RENDER_PASS_EXT, false, VALIDATION_ERROR_00110);
             }
         }
     }
