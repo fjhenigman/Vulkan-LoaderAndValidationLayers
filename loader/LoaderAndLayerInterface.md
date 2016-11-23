@@ -4,22 +4,28 @@
  * [Overview](#overview)
   * [Goals of the Loader](#goals-of-the-loader)
   * [Who Should Read This Document](#who-should-read-this-document)
+ * [Instance Versus Device](#instance-versus-device)
+  * [Instance-related Items](#instance-related-items)
+  * [Device-related Items](#device-related-items)
  * [Application Interface to the Loader](#application-interface-to-the-loader)
-  * [Vulkan Direct Exports](#vulkan-direct-exports)
-  * [Indirectly Linking to the Loader](#indirectly-linking-to-the-loader)
-  * [ABI Versioning](#abi-versioning)
+  * [Interfacing with Vulkan Commands](#interfacing-with-vulkan-commands)
+    * [Vulkan Direct Exports](#vulkan-direct-exports)
+    * [Indirectly Linking to the Loader](#indirectly-linking-to-the-loader)
+    * [Best Application Performance Setup](#best-application-performance-setup)
+    * [ABI Versioning](#abi-versioning)
   * [Application Layer Usage](#application-layer-usage)
     * [Forcing Layers to be Enabled](#forcing-layers-to-be-enabled)
     * [Implicit vs Explicit Layers](#implicit-vs-explicit-layers)
     * [Overall Layer Ordering](#overall-layer-ordering)
   * [Application Usage of Extensions](#application-usage-of-extensions)
     * [Instance and Device Extensions](#instance-and-device-extensions)
-    * [Querying Extension Commands](#querying-instance-commands)
- * [Architectural overview of layers and loader](#architectural-overview-of-layers-and-loader)
- * [Vulkan Installable Client Driver interface with the loader](#vulkan-installable-client-driver-interface-with-the-loader)
- * [ICD interface requirements](#icd-interface-requirements)
+    * [WSI Extensions](#wsi-extensions)
+    * [Unknown Extensions](#unknown-extensions)
+ * [Loader and Layer Interface](#loader-and-layer-interface)
  * [Vulkan layer interface with the loader](#vulkan-layer-interface-with-the-loader)
  * [Layer interface requirements](#layer-interface-requirements)
+ * [Vulkan Installable Client Driver interface with the loader](#vulkan-installable-client-driver-interface-with-the-loader)
+ * [ICD interface requirements](#icd-interface-requirements)
 
 ## Overview
 
@@ -58,22 +64,95 @@ While this document is primarily targeted at developers of Vulkan applications,
 drivers and layers, the information contained in it could be useful to any
 developer.
 
+<br/>
+
+## Instance Versus Device
+
+There is an important concept which you will see brought up repeatedly throughout this
+document.  Many commands, extensions, and other things in Vulkan are separated into
+two main groups:
+ * Instance-related Items
+ * Device-related Items
+
+#### Instance-related Items
+
+A Vulkan Instance is a high-level construct used to provide Vulkan system-level
+information, or functionality.  Vulkan items associated directly with an instance are:
+ * VkInstance
+ * VkPhysicalDevice
+
+An Instance command is any Vulkan command which takes as its first parameter either an
+item from the Instance list, or nothing at all.  Some Vulkan Instance commands are:
+ * vkEnumerateInstanceExtensionProperties
+ * vkCreateInstance
+ * vkEnumeratePhysicalDevices
+
+You query commands Vulkan Instance commands using the `vkGetInstanceProcAddr` command.
+`vkGetInstanceProcAddr` can be used to query either device or instance entry points
+in addition to all core entry points.  The returned function pointer is valid for
+this Instance and any item created under this Instance (including all `VkDevice`s).  
+
+Similarly, an Instance extension is a set of Vulkan Instance commands extending the Vulkan language.
+These will be discussed in more detail later.
+
+
+#### Device-related Items
+
+A Vulkan Device, on the other-hand, is a logical identifier used to associate commands 
+with a particular physical device on a user's system.  Vulkan constructs associated directly
+with a device include:
+ * VkDevice
+ * VkQueue
+ * VkCommandBuffer
+ * Any dispatchable object that is a child of a one of the above.
+
+A Device command is any Vulkan command which takes any Device item as its first
+parameter.  Some Vulkan Device commands are:
+ * vkQueueSubmit
+ * vkBeginCommandBuffe
+ * vkCreateEvent
+
+You can query commands Vulkan Device commands using either the `vkGetInstanceProcAddr` or 
+`vkGetDeviceProcAddr` commands.  If you choose to use `vkGetInstanceProcAddr`, it will have additional
+level built into the call chain, which will reduce performance slightly.  However, the function pointer
+returned can be used for any device created later, as long as it is associated with the same Vulkan Instance.
+If, instead you use `vkGetDeviceProcAddr`, the call chain will be more optimized to the specific device,
+but it will **only** work for the device used to query the command function pointer.  Also, unlike
+`vkGetInstanceProcAddr`, `vkGetDeviceProcAddr` can only be used on core Vulkan Device commands, or
+Device extension commands.
+
+The best solution is to query Instance extension commands using `vkGetInstanceProcAddr`, and to
+query Device extension commands using `vkGetDeviceProcAddr`.  See
+[Best Application Performance Setup](#best-application-performance-setup) for more information on this.
+
+As with Instance extensions, a Device extension is a set of Vulkan Device
+commands extending the Vulkan language. You can read more about these later in the document.
+
+You can query 
+
+<br/>
 
 ## Application Interface to the Loader
 
 In this section we'll discuss how an application interacts with the loader, including:
- * [Vulkan Direct Exports](#vulkan-direct-exports)
- * [Indirectly Linking to the Loader](#indirectly-linking-to-the-loader)
- * [ABI Versioning](#abi-versioning)
+ * [Interfacing with Vulkan Commands](#interfacing-with-vulkan-commands)
+  * [Vulkan Direct Exports](#vulkan-direct-exports)
+  * [Indirectly Linking to the Loader](#indirectly-linking-to-the-loader)
+  * [Best Application Performance Setup](#best-application-performance-setup)
+  * [ABI Versioning](#abi-versioning)
  * [Application Layer Usage](#application-layer-usage)
   * [Forcing Layers to be Enabled](#forcing-layers-to-be-enabled)
   * [Implicit vs Explicit Layers](#implicit-vs-explicit-layers)
   * [Overall Layer Ordering](#overall-layer-ordering)
  * [Application Usage of Extensions](#application-usage-of-extensions)
   * [Instance and Device Extensions](#instance-and-device-extensions)
-  * [Querying Extension Commands](#querying-instance-commands)
+  * [WSI Extensions](#wsi-extensions)
+  * [Unknown Extensions](#unknown-extensions)
 
-#### Vulkan Direct Exports
+#### Interfacing with Vulkan Commands
+There are several ways you can interface with Vulkan commands through the loader.
+
+##### Vulkan Direct Exports
 The loader library on Windows, Linux and Android will export all core Vulkan
 and all appropriate Window System Interface (WSI) extensions. This is done to
 make it simpler to get started with Vulkan development. When an application
@@ -81,20 +160,64 @@ links directly to the loader library in this way, the Vulkan calls are simple
 trampoline functions that jump to the appropriate dispatch table entry for the
 object they are given.
 
-#### Indirectly Linking to the Loader
+##### Indirectly Linking to the Loader
 Applications are not required to link directly to the loader library, instead
 they can use the appropriate platform specific dynamic symbol lookup on the
 loader library to initialize the application's own dispatch table. This allows
 an application to fail gracefully if the loader cannot be found.  It also
 provides the fastest mechanism for the application to call Vulkan functions. An
 application will only need to query (via system calls such as dlsym()) the
-address of vkGetInstanceProcAddr from the loader library. Using
-vkGetInstanceProcAddr the application can then discover the address of all
-instance and global functions and extensions, such as vkCreateInstance,
-vkEnumerateInstanceExtensionProperties and vkEnumerateInstanceLayerProperties
-in a platform independent way.
+address of `vkGetInstanceProcAddr` from the loader library. Using
+`vkGetInstanceProcAddr` the application can then discover the address of all
+functions and extensions available, such as `vkCreateInstance`,
+`vkEnumerateInstanceExtensionProperties` and `vkEnumerateInstanceLayerProperties`
+in a platform-independent way.
 
-#### ABI Versioning
+##### Best Application Performance Setup
+If you desire the best performance possible, you should setup your own
+dispatch table so that all your Instance commands are queried using `vkGetInstanceProcAddr`
+and all your Device commands are queried using `vkGetDeviceProcAddr`.
+
+*Why should you do this?*
+
+The answer comes in how the call chain of Instance commands are implemented versus the
+call chain of a Device commands.
+
+A Vulkan Instance is a high-level construct used to provide Vulkan system-level
+information, or functionality. Because of this, most Instance commands need to be
+broadcasted to every available ICD on the system.  This is because, at any point
+in the future, the application could create a `VkDevice` to any of the available
+`VkPhysicalDevice`s on the system.  The following diagram shows an approximate view
+of an Instance Chain with 3 enabled layers:
+
+![Instance Chain](./images/loader_instance_chain.png)
+
+The above is also how any command chain looks if you query even a Vulkan Device
+command (core or extension) using `vkGetInstanceProcAddr`.  However, a Device
+command, on the other hand, doesn't need to worry about the broadcast
+since it knows specifically which ICD and which Physical Device it is associated with.
+Because of this, the loader doesn't need to get involved between any enabled
+layers and the ICD.  Thus, if you used a loader-exported Vulkan command, the loader's
+device chain in the same scenario as above would look like:
+
+![Loader Device Chain](./images/loader_device_chain_loader.png)
+
+An even better solution would be for an application to perform a `vkGetDeviceProcAddr`
+call on all Device functions.  This further optimizes the call chain by removing the
+loader all-together under most scenarios:
+
+![Application Device Chain](./images/loader_device_chain_app.png)
+
+Also, notice if no layers are enabled, your application function pointer would point
+**directly to the ICD**.  If called enough, those fewer calls can add up to performance savings.
+
+Remember:
+ * `vkGetInstanceProcAddr` can be used to query
+either device or instance entry points in addition to all core entry points.
+ * `vkGetDeviceProcAddr` can only be used to query for device
+extension or core device entry points.
+
+##### ABI Versioning
 The Vulkan loader library will be distributed in various ways including Vulkan
 SDKs, OS package distributions and IHV driver packages. These details are
 beyond the scope of this document. However, the name and versioning of the
@@ -220,8 +343,8 @@ environment variable). Explicit layers are those layers enabled by the
 application (or environment variable) by providing the layer name. Implicit
 layers are those layers enabled by the loader automatically. Any implicit
 layers the loader discovers on the system in the appropriate location will be
-enabled (subject to environment variable overrides described later). Discovery
-of properly installed implicit and explicit layers is described later.
+enabled (subject to environment variable overrides described later).
+Discovery of properly installed implicit and explicit layers is described later.
 Explicitly enabling a layer that is implicitly enabled has no additional
 effect: the layer will still be enabled implicitly by the loader.
 
@@ -252,19 +375,20 @@ found in the Vulkan Spec, and vulkan.h header file.
 
 ##### Instance and Device Extensions
 
-There are really two types of extensions:
+As hinted at in the [Instance Versus Device](#instance-versus-device) section,
+there are really two types of extensions:
  * Instance Extensions
  * Device Extensions
 
-The description of each is pretty obvious.  An Instance extension is an
-extension which modifies existing behavior or implements new behavior on
-Instance level objects, like a `VkInstance` or a `VkPhysicalDevice`.  A Device
-extension is an extension which does the same, but for any `VkDevice` object,
-or any dispatchable object that is a child of a `VkDevice` (`VkQueue` and
-`VkCommandBuffer` are examples of these).  It is **very** important to
-know what type of extension you are desiring to enable as you will enable
-Instance extensions during `vkCreateInstance` and Device extensions during
-`vkCreateDevice`.
+An Instance extension is an extension which modifies existing behavior or
+implements new behavior on Instance level objects, like a `VkInstance` or
+a `VkPhysicalDevice`.  A Device extension is an extension which does the same,
+but for any `VkDevice` object, or any dispatchable object that is a child of a
+`VkDevice` (`VkQueue` and `VkCommandBuffer` are examples of these).
+
+It is **very** important to know what type of extension you are desiring to
+enable as you will enable Instance extensions during `vkCreateInstance` and
+Device extensions during `vkCreateDevice`.
 
 The loader discovers and aggregates all
 extensions from layers (both explicit and implicit), ICDs and the loader before
@@ -291,33 +415,12 @@ enumerated. Duplicate extensions (e.g. an implicit layer and ICD might report
 support for the same extension) are eliminated by the loader. For duplicates, the
 ICD version is reported and the layer version is culled.
 
-**VERY IMPORTANT NOTE:**  Extensions *must be enabled* (in `vkCreateInstance` or
-`vkCreateDevice`) before they can be used.
+Also, Extensions *must be enabled* (in `vkCreateInstance` or
+`vkCreateDevice`) before the commands associated with the extensions can be used.  If
+you get an Extension command using either `vkGetInstanceProcAddr` or `vkGetDeviceProcAddr`,
+but fail to enable it, you could experience undefined behavior.  This should actually
+be flagged if you run with Validation layers enabled.
 
-##### Querying Extension Commands
-
-Extension command entry points should be queried via vkGetInstanceProcAddr or
-vkGetDeviceProcAddr. vkGetDeviceProcAddr can only be used to query for device
-extension or core device entry points. Device entry points include any command
-that uses a VkDevice as the first parameter or a dispatchable object that is a
-child of a VkDevice (currently this includes VkQueue and VkCommandBuffer).
-vkGetInstanceProcAddr can be used to query either device or instance extension
-entry points in addition to all core entry points.
-
-VkGetDeviceProcAddr is particularly interesting because it will provide the
-most efficient way to call into the ICD. For example, the diagram below shows
-what could happen if the application were to use vkGetDeviceProcAddr for the
-function "vkGetDeviceQueue" and "vkDestroyDevice" but not "vkAllocateMemory".
-The resulting function pointer (fpGetDeviceQueue) would be the ICD's entry
-point if the loader and any enabled layers do not need to see that call. Even
-if an enabled layer intercepts the call (e.g. vkDestroyDevice) the loader
-trampoline code is skipped for function pointers obtained via
-vkGetDeviceProcAddr. This also means that function pointers obtained via
-vkGetDeviceProcAddr will only work with the specific VkDevice it was created
-for, using it with another device has undefined results. For extensions,
-Get\*ProcAddr will often be the only way to access extension API features.
-
-![Get*ProcAddr efficiency](get_proc_addr.png)
 
 ##### WSI Extensions
 
@@ -325,19 +428,22 @@ Khronos approved WSI extensions are available and provide Windows System Integra
 support for various execution environments. It is important to understand that some WSI
 extensions are valid for all targets, but others are particular to a given execution
 environment (and loader). This desktop loader (currently targeting Windows and Linux)
-only enables those WSI extensions that are appropriate to the current environment.
-For the most part, the selection is done in the loader using  compile-time preprocessor
-flags. All versions of the desktop loader currently expose at least the following WSI
-extension support:
+only enables and directly exports those WSI extensions that are appropriate to the
+current environment. For the most part, the selection is done in the loader using
+compile-time preprocessor flags. All versions of the desktop loader currently expose
+at least the following WSI extension support:
 - VK_KHR_surface
 - VK_KHR_swapchain
 - VK_KHR_display
 
 In addition, each of the following OS targets for the loader support target-specific extensions:
-- **Windows** : VK_KHR_win32_surface
-- **Linux (default)** : VK_KHR_xcb_surface and VK_KHR_xlib_surface
-- **Linux (Wayland build)** : VK_KHR_wayland_surface
-- **Linux (Mir build)** : VK_KHR_mir_surface
+
+| Windowing System | Extensions available |
+|----------------|--------------------|
+| Windows  | VK_KHR_win32_surface |
+| Linux (Default) |  VK_KHR_xcb_surface and VK_KHR_xlib_surface |
+| Linux (Wayland) | VK_KHR_wayland_surface |
+| Linux (Mir)  | VK_KHR_mir_surface |
 
 **NOTE:** Wayland and Mir targets are not fully supported at this time and should be considered
 alpha quality.
@@ -346,12 +452,13 @@ It is important to understand that while the loader may support the various entr
 for these extensions, there is a hand-shake required to actually use them:
 * At least one physical device must support the extension(s)
 * The application must select such a physical device
-* The application must request the extension(s) be enabled while creating the instance or logical device (This depends on whether or not the given extension works with an instance or a device).
+* The application must request the extension(s) be enabled while creating the instance
+or logical device (This depends on whether or not the given extension works with an instance or a device).
 * The instance and/or logical device creation must succeed.
 
 Only then can you expect to properly use a WSI extension in your Vulkan program.
 
-##### New Extensions
+##### Unknown Extensions
 
 With the ability to expand Vulkan so easily, extensions will be created that the loader knows
 nothing about.  If the extension is a device extension, the loader will pass the unknown
@@ -361,7 +468,8 @@ However, if the extension is an instance extension, the loader will fail to load
 *But why doesn't the loader support unknown instance extensions?*
 <br/>
 Let's look again at the Instance call chain:
-![Instance call chain](instance_call_chain.png)
+
+![Instance call chain](./images/loader_instance_chain.png)
 
 Notice that for a normal instance function call, the loader has to handle passing along the
 function call to the available ICDs.  If the loader has no idea of the parameters or return
@@ -379,9 +487,9 @@ No!  Most extension functionality only affects a device and not an instance or a
 device.  Thus, the overwhelming majority of extensions will be device extensions rather than
 instance extensions.
 
+<br/>
 
-
-## Architectural overview of layers and loader
+## Loader and Layer Interface
 
 Layers are implemented as libraries that can be enabled in different ways
 (including by application request) and loaded during CreateInstance.  Each
@@ -443,492 +551,6 @@ they deal with only a single device and the ICD can always be the terminator of
 the chain. The below diagram also illustrates how layers (either device or
 instance) can skip intercepting any given Vulkan entry point.
 ![Chain skipping layers](chain_skipping_layers.png)
-
-<br/>
-
-## Vulkan Installable Client Driver interface with the loader
-
-### ICD discovery
-
-Vulkan allows multiple drivers each with one or more devices (represented by a
-Vulkan VkPhysicalDevice object) to be used collectively. The loader is
-responsible for discovering available Vulkan ICDs on the system. Given a list
-of available ICDs, the loader can enumerate all the physical devices available
-for an application and return this information to the application. The process
-in which the loader discovers the available Installable Client Drivers (ICDs)
-on a system is platform dependent. Windows, Linux and Android ICD discovery
-details are listed below.
-
-#### Windows
-
-##### Properly-Installed ICDs
-
-In order to find properly-installed ICDs, the Vulkan loader will scan the
-values in the following Windows registry key:
-
-HKEY\_LOCAL\_MACHINE\\SOFTWARE\\Khronos\\Vulkan\\Drivers
-
-On 64-bit Windows, when a 32-bit application is triggered, the loader
-will scan for 32-bit drivers in a separate area of the registry:
-
-HKEY\_LOCAL\_MACHINE\\SOFTWARE\\WOW6432Node\\Khronos\\Vulkan\\Drivers
-
-For each value in this key which has DWORD data set to 0, the loader opens the
-JSON format text information file (a.k.a. "manifest file") specified by the
-name of the value. Each name must be a full pathname to the text manifest file.
-The Vulkan loader will open each manifest file to obtain the name or pathname
-of an ICD shared library (".dll") file. For example:
-
- ```
- {
-    "file_format_version": "1.0.0",
-    "ICD": {
-        "library_path": "path to ICD library",
-        "api_version": "1.0.5"
-    }
-  }
-  ```
-
-
-The "library\_path" specifies either a filename, a relative pathname, or a full
-pathname to an ICD shared library file, which the loader will attempt to load
-using LoadLibrary(). If the ICD is specified via a filename, the shared library
-lives in the system's DLL search path (e.g. in the "C:\Windows\System32"
-folder). If the ICD is specified via a relative pathname, it is relative to the
-path of the manifest file. Relative pathnames are those that do not start with
-a drive specifier (e.g. "C:"), nor with a directory separator (i.e. the '\\'
-character), but do contain at least one directory separator.
-
-The "file\_format\_version" specifies a major.minor.patch version number in
-case the format of the text information file changes in the future. If the same
-ICD shared library supports multiple, incompatible versions of text manifest
-file format versions, it must have separate JSON files for each (all of which may
-point to the same shared library).
-
-The "api\_version" specifies the major.minor.patch version number of the Vulkan
-API that the shared library (referenced by "library\_path") was built with.
-
-There are no rules about the name of the text information files (except the
-.json suffix).
-
-There are no rules about the name of the ICD shared library files. For example,
-if the registry contains the following values,
-
-```
-[HKEY_LOCAL_MACHINE\SOFTWARE\Khronos\Vulkan\Drivers\]
-
-"C:\vendor a\vk_vendora.json"=dword:00000000
-
-"C:\windows\system32\vendorb_vk.json"=dword:00000000
-
-"C:\windows\system32\vendorc_icd.json"=dword:00000000
-```
-then the loader will open the following text information files, with the
-specified contents:
-
-| Text File Name | Text File Contents |
-|----------------|--------------------|
-|vk\_vendora.json  | "ICD": { "library\_path": "C:\VENDOR A\vk_vendora.dll", "api_version": "1.0.5" } |
-| vendorb\_vk.json |  "ICD": { "library\_path": "vendorb\_vk.dll", "api_version": "1.0.5" } |
-|vendorc\_icd.json  | "ICD": { "library\_path": "vedorc\_icd.dll", "api_version": "1.0.5" }|
-
-Then the loader will open the three files mentioned in the "Text File Contents"
-column, and then try to load and use the three shared libraries indicated by
-the ICD.library\_path value.
-
-##### Using Pre-Production ICDs
-
-IHV developers (and sometimes other developers) need to use special,
-pre-production ICDs. In some cases, a pre-production ICD may be in an
-installable package. In other cases, a pre-production ICD may simply be a
-shared library in the developer's build tree. In this latter case, we want to
-allow developers to point to such an ICD without modifying the
-properly-installed ICD(s) on their system.
-
-This need is met with the use of the "VK\_ICD\_FILENAMES" environment variable,
-which will override the mechanism used for finding properly-installed ICDs. In
-other words, only the ICDs listed in "VK\_ICD\_FILENAMES" will be used. The
-"VK\_ICD\_FILENAMES" environment variable is a semi-colon-separated list of ICD
-text information files (aka manifest files), containing the following:
-
-- A full pathname (e.g. "C:\\my\_build\\my\_icd.json")
-
-Typically, "VK\_ICD\_FILENAMES" will only contain a full pathname to one info
-file for a developer-built ICD. A semi-colon is only used if more than one ICD
-is listed.
-
-For example, if a developer wants to refer to one ICD that they built, they
-could set the "VK\_ICD\_FILENAMES" environment variable to:
-
-C:\\my\_build\\my\_icd.json
-
-If a developer wants to refer to two ICDs, one of which is a properly-installed
-ICD, they can use the full pathname of the text file:
-
-C:\\Windows\\System32\\vendorc\_icd.json;C:\\my\_build\\my\_icd.json
-
-Notice the semi-colon between "C:\\Windows\\System32\\vendorc\_icd.json" and
-"C:\\my\_build\\my\_icd.json".
-
-#### Linux
-
-##### Properly-Installed ICDs
-
-In order to find properly-installed ICDs, the Vulkan loader will scan the files
-in the following Linux directories:
-
-```
-    /usr/local/etc/vulkan/icd.d
-    /usr/local/share/vulkan/icd.d
-    /etc/vulkan/icd.d
-    /usr/share/vulkan/icd.d
-    $HOME/.local/share/vulkan/icd.d
-```
-
-The "/usr/local/*" directories can be configured to be other directories at build time.
-
-Where $HOME is the current home directory of the application's user id; this
-path will be ignored for suid programs.
-
-These directories will contain text information files (a.k.a. "manifest
-files"), that use a JSON format.
-
-The Vulkan loader will open each manifest file found to obtain the name or
-pathname of an ICD shared library (".so") file. For example:
-
-```
-{
-    "file_format_version": "1.0.0",
-    "ICD": {
-        "library_path": "path to ICD library",
-        "api_version": "1.0.5"
-    }
-}
-```
-The "library\_path" specifies either a filename, a relative pathname, or a full
-pathname to an ICD shared library file. If the ICD is specified via a filename,
-the loader will attempt to open that file as a shared object using dlopen(),
-and the file must be in a directory that dlopen is configured to look in (Note:
-various distributions are configured differently). A distribution is free to
-create Vulkan-specific system directories (e.g. ".../vulkan/icd"), but is not
-required to do so. If the ICD is specified via a relative pathname, it is
-relative to the path of the info file. Relative pathnames are those that do not
-start with, but do contain at least one directory separator (i.e. the '/'
-character). For example, "lib/vendora.so" and "./vendora.so" are examples of
-relative pathnames.
-
-The "file\_format\_version" provides a major.minor.patch version number in case
-the format of the manifest file changes in the future. If the same ICD shared
-library supports multiple, incompatible versions of manifest file format
-versions, it must have multiple manifest files (all of which may point to the
-same shared library).
-
-The "api\_version" specifies the major.minor.patch version number of the Vulkan
-API that the shared library (referenced by "library\_path") was built with.
-
-The "/usr/local/etc/vulkan/icd.d" and "/usr/local/share/vulkan/icd.d"
-directories are for locally-built ICDs.
-
-The "/etc/vulkan/icd.d" directory is for
-ICDs that are installed from non-Linux-distribution-provided packages.
-
-The "/usr/share/vulkan/icd.d" directory is for ICDs that are installed from
-Linux-distribution-provided packages. 
-
-There are no rules about the name of the text files (except the .json suffix).
-
-There are no rules about the name of the ICD shared library files. For example,
-if the "/usr/share/vulkan/icd.d" directory contain the following files, with
-the specified contents:
-
-| Text File Name    | Text File Contents     |
-|-------------------|------------------------|
-| vk\_vendora.json | "ICD": { "library\_path": "vendora.so", "api_version": "1.0.5" } |
-| vendorb\_vk.json | "ICD": { "library\_path": "vendorb\_vulkan\_icd.so", "api_version": "1.0.5" } |
-| vendorc\_icd.json | "ICD": { "library\_path": "/usr/lib/VENDORC/icd.so", "api_version": "1.0.5" } |
-
-then the loader will open the three files mentioned in the "Text File Contents"
-column, and then try to load and use the three shared libraries indicated by
-the ICD.library\_path value.
-
-##### Using Pre-Production ICDs
-
-IHV developers (and sometimes other developers) need to use special,
-pre-production ICDs. In some cases, a pre-production ICD may be in an
-installable package. In other cases, a pre-production ICD may simply be a
-shared library in the developer's build tree. In this latter case, we want to
-allow developers to point to such an ICD without modifying the
-properly-installed ICD(s) on their system.
-
-This need is met with the use of the "VK\_ICD\_FILENAMES" environment variable,
-which will override the mechanism used for finding properly-installed ICDs. In
-other words, only the ICDs listed in "VK\_ICD\_FILENAMES" will be used.
-
-The "VK\_ICD\_FILENAMES" environment variable is a colon-separated list of ICD
-manifest files, containing the following:
-
-- A filename (e.g. "libvkicd.json") in the
-"/usr/local/etc/vulkan/icd.d",
-"/usr/local/share/vulkan/icd.d",
-"/etc/vulkan/icd.d",
-"/usr/share/vulkan/icd.d",
-"$HOME/.local/share/vulkan/icd.d"
-directories
-
-- A full pathname (e.g. "/my\_build/my\_icd.json")
-
-Typically, "VK\_ICD\_FILENAMES" will only contain a full pathname to one info
-file for a developer-built ICD. A colon is only used if more than one ICD is
-listed.
-
-For example, if a developer wants to refer to one ICD that they built, they
-could set the "VK\_ICD\_FILENAMES" environment variable to:
-
-/my\_build/my\_icd.json
-
-If a developer wants to refer to two ICDs, one of which is a properly-installed
-ICD, they can use the name of the text file in the system directory:
-
-vendorc\_vulkan.json:/my\_build/my\_icd.json
-
-Notice the colon between "vendorc\_vulkan.json" and "/my\_build/my\_icd.json".
-
-NOTE: this environment variable will be ignored for suid programs.
-
-#### Android
-
-The Android loader lives in the system library folder. The location cannot be
-changed. The loader will load the driver/ICD via hw_get_module with the ID
-of "vulkan". Due to security policies in Android none of this can be modified
-under normal use.
-
-<br/>
-
-## ICD interface requirements ##
-
-Generally, for all Vulkan commands issued by an application, the loader can be
-viewed as a pass through. That is, the loader generally doesn't modify the
-commands or their parameters, but simply calls the ICDs entry point for that
-command. There are specific additional interface requirements an ICD needs to comply with that
-are over and above any requirements from the Vulkan specification including WSI extension specification.
-These addtional requirements are versioned to allow flexibility in the future.
-These interface requirements will be set forth in the following sections: 1) describing
-which "loader-ICD" interface version is available, 2) detailing the most recent interface version;
-3) the supported, older interface requirements will be described as differences
-from the most recent interface version.
-
-#### Windows and Linux
-
-##### Version Negotiation Between Loader and ICDs
-
-All ICDs (supporting interface version 2 or higher) must export the following
-function that is used for determination of the interface version that will be used.
-This entry point is not a part of the Vulkan API itself, only a private interface
-between the loader and ICDs.
-
-VKAPI_ATTR VkResult VKAPI_CALL vk_icdNegotiateLoaderICDInterfaceVersion(uint32_t* pSupportedVersion);
-
-This entry point reports the "loader-ICD" interface version supported by both the loader and the ICD.
-The loader informs the ICD of it's desired interface version (typically the latest) via the
-pSupportedVersion parameter.
-This call is the first call made by the loader into the ICD  (prior to any calls to
-vk\_icdGetInstanceProcAddr).
-
-If a loader sees that an ICD does not export this symbol it knows that it's dealing
-with a legacy ICD supporting either interface version 0 or 1.
-Similarly, if an ICD sees a call to vk\_icdGetInstanceProcAddr before a call to
-vk_icdGetLoaderICDInterfaceVersion then it knows that it's dealing with a legacy loader
-supporting version 0 or 1.
-**Note** if the loader calls vk\_icdGetInstanceProcAddr first it supports at least version 1,
-otherwise the loader only supports version 0.
-
-The pSupportedVersion parameter is both an input and output parameter.
-It is filled in by the loader before the call with the desired latest interface version supported by the loader.
-
-If the ICD receiving the call no longer supports the interface version provided
-by the loader (due to deprecation) then it can report VK_ERROR_INCOMPATIBLE_DRIVER error,
-otherwise it sets the value pointed by pSupportedVersion to the latest interface
-version supported by both the ICD and the loader and returns VK_SUCCESS.
-The ICD should report VK_SUCCESS in case the loader provided interface version
-is newer than that supported by the ICD, as it's the loader's responsibility to
-determine whether it can support the older interface version supported by the ICD.
-The ICD should also report VK_SUCCESS in the case it's interface version is greater
-than the loader's, but return the loader's version. Thus, upon return of VK_SUCCESS
-the pSupportedVersion will contain the desired interface version to be used by the ICD.
-
-If the loader receives back an interface version from the ICD that the loader no longer
-supports (due to deprecation) or it receives a VK_ERROR_INCOMPATIBLE_DRIVER error
-instead of VK_SUCCESS then the loader will treat the ICD as incompatible
-and will not load it for use.  In this case the application will not see the ICDs vkPhysicalDevice
-during enumeration.
-
-##### Loader Version 3 Interface Changes
-
-The primary change occuring in version 3 of the loader/ICD interface is to allow an ICD to
-handle Creation/Destruction of their own KHR_surfaces.  Up until this point, the loader created
-a surface object that was used by all ICDs.  However, some ICDs may want to provide their
-own surface handles.  If an ICD chooses to enable this support, they must export support for
-version 3 of the Loader/ICD interface as well as any Vulkan command that uses a KHR_surface handle,
-such as:
-- vkCreateXXXSurfaceKHR (where XXX is the platform specific identifier [i.e.CreateWin32SurfaceKHR for Windows])
-- vkDestroySurfaceKHR
-- vkCreateSwapchainKHR
-- vkGetPhysicalDeviceSurfaceSupportKHR
-- vkGetPhysicalDeviceSurfaceCapabilitiesKHR
-- vkGetPhysicalDeviceSurfaceFormatsKHR
-- vkGetPhysicalDeviceSurfacePresentModesKHR
-
-An ICD can still choose to not take advantage of this functionality by simply not exposing the
-above the vkCreateXXXSurfaceKHR and vkDestroySurfaceKHR commands.
-
-##### Loader Version 2 Interface Requirements
-
-Version 2 interface has requirements in three areas:
- 1. ICD Vulkan entry point discovery,
- 2. KHR_surface related requirements in the WSI extensions,
- 3. Vulkan dispatchable object creation requirements.
-
-######  ICD Vulkan entry point discovery
-All ICDs must export the following function that is used for discovery of ICD Vulkan entry points.
-This entry point is not a part of the Vulkan API itself, only a private interface between the loader and ICDs for version 1 and higher interfaces.
-
-VKAPI\_ATTR PFN\_vkVoidFunction VKAPI\_CALL vk\_icdGetInstanceProcAddr(VkInstance instance, const char* pName);
-
-This function has very similar semantics to the Vulkan command vkGetInstanceProcAddr.
-vk\_icdGetInstanceProcAddr returns valid function pointers for all the global level
-and instance level Vulkan commands, and also for vkGetDeviceProcAddr.
-Global level commands are those
-which contain no dispatchable object as the first parameter, such as
-vkCreateInstance and vkEnumerateInstanceExtensionProperties. The ICD must
-support querying global level entry points by calling
-vk\_icdGetInstanceProcAddr with a NULL VkInstance parameter. Instance level
-commands are those that have either VkInstance, or VkPhysicalDevice as the
-first parameter dispatchable object. Both core entry points and any instance
-extension entry points the ICD supports should be available via
-vk\_icdGetInstanceProcAddr. Future Vulkan instance extensions may define and
-use new instance level dispatchable objects other than VkInstance and
-VkPhysicalDevice, in which case extension entry points using these newly
-defined dispatchable objects must be queryable via vk\_icdGetInstanceProcAddr.
-
-All other Vulkan entry points must either NOT be exported from the ICD
-library or else NOT use the official Vulkan function names if they are
-exported. This requirement is for ICD libraries that include other
-functionality (such as OpenGL library) and thus could be loaded by the
-application prior to when the Vulkan loader library is loaded by the
-application. In other words, the ICD library exported Vulkan symbols must not
-clash with the loader's exported Vulkan symbols.
-
-Beware of interposing by dynamic OS library loaders if the official Vulkan
-names are used. On Linux, if official names are used, the ICD library must be
-linked with -Bsymbolic.
-
-###### Handling KHR_surface objects in the WSI extensions
-Normally, ICDs handle object creation and destruction for various Vulkan
-objects. The WSI surface extensions for Linux and Windows
-(VK\_KHR\_win32\_surface, VK\_KHR\_xcb\_surface, VK\_KHR\_xlib\_surface,
-VK\_KHR\_mir\_surface, VK\_KHR\_wayland\_surface, and VK\_KHR\_surface) are
-handled differently. For these extensions, the VkSurfaceKHR object creation and
-destruction is handled by the loader as follows:
-
-1. Loader handles the vkCreate\*SurfaceKHR() and vkDestroySurfaceKHR()
-   functions including creating/destroying the VkSurfaceKHR object.
-
-2. VkSurfaceKHR objects have the underlying structure (VkIcdSurface\*) as
-   defined in include/vulkan/vk\_icd.h.
-
-3. ICDs can cast any VkSurfaceKHR object to a pointer to the appropriate
-   VkIcdSurface\* structure.
-
-4. VkIcdSurface\* structures include VkIcdSurfaceWin32, VkIcdSurfaceXcb,
-   VkIcdSurfaceXlib, VkIcdSurfaceMir, and VkIcdSurfaceWayland. The first field
-   in the structure is a VkIcdSurfaceBase enumerant that indicates whether the
-   surface object is Win32, Xcb, Xlib, Mir, or Wayland.
-
-###### ICD dispatchable object creation
-As previously covered, the loader requires dispatch tables to be accessible
-within Vulkan dispatchable objects, which include VkInstance, VkPhysicalDevice,
-VkDevice, VkQueue, and VkCommandBuffer. The specific requirements on all
-dispatchable objects created by ICDs are as follows:
-
-- All dispatchable objects created by an ICD can be cast to void \*\*
-
-- The loader will replace the first entry with a pointer to the dispatch table
-  which is owned by the loader. This implies three things for ICD drivers:
-
-1. The ICD must return a pointer for the opaque dispatchable object handle.
-
-2. This pointer points to a regular C structure with the first entry being a
-   pointer. Note: for any C\++ ICD's that implement VK objects directly as C\++
-   classes. The C\++ compiler may put a vtable at offset zero if your class is
-   non-POD due to the use of a virtual function. In this case use a regular C
-   structure (see below).
-
-3. The loader checks for a magic value (ICD\_LOADER\_MAGIC) in all the created
-   dispatchable objects, as follows (see include/vulkan/vk\_icd.h):
-
-```
-
-#include "vk_icd.h"
-
-union _VK_LOADER_DATA {
-    uintptr loadermagic;
-    void *loaderData;
-} VK_LOADER_DATA;
-
-vkObj alloc_icd_obj()
-{
-    vkObj *newObj = alloc_obj();
-    ...
-    // Initialize pointer to loader's dispatch table with ICD_LOADER_MAGIC
-
-    set_loader_magic_value(newObj);
-    ...
-    return newObj;
-}
-```
-
-##### Loader Version 0 and 1 Interface Differences
-
-Version 0 and 1 interfaces do not support version negotiation via vk\_icdNegotiateLoaderICDInterfaceVersion.
-ICDs can distinguish version 0 and version 1 interfaces as follows:
-if the loader calls vk\_icdGetInstanceProcAddr first it supports version 1,
-otherwise the loader only supports version 0.
-
-Version 0 interface does not support vk\_icdGetInstanceProcAddr.  Version 0 interface requirements for
-obtaining ICD Vulkan entry points are as follows:
-
-- vkGetInstanceProcAddr exported in the ICD library and returns valid function
-  pointers for all the Vulkan API entry points;
-
-- vkCreateInstance exported in the ICD library;
-
-- vkEnumerateInstanceExtensionProperties exported in the ICD library;
-
-
-Additional Notes:
-
-- The loader will filter out extensions requested in vkCreateInstance and
-vkCreateDevice before calling into the ICD; Filtering will be of extensions
-advertised by entities (e.g. layers) different from the ICD in question.
-- The loader will not call the ICD for vkEnumerate\*LayerProperties() as layer
-properties are obtained from the layer libraries and layer JSON files.
-- If an ICD library wants to implement a layer it can do so by having the
-appropriate layer JSON manifest file refer to the ICD library file.
-- The loader will not call the ICD for
-  vkEnumerate\*ExtensionProperties(pLayerName != NULL).
-- ICDs creating new dispatchable objects via device extensions need to initialize
-the created dispatchable object.  The loader has generic trampoline code for unknown
-device extensions.  This generic trampoline code doesn't initialize the dispatch table within
-the newly created object.  See the section for more information on how to initialize created
-dispatchable objects for extensions non known by the loader. [layer link](#creating-new-dispatchable-objects)
-
-#### Android
-
-The Android loader uses the same protocol for initializing the dispatch
-table as described above. The only difference is that the Android
-loader queries layer and extension information directly from the
-respective libraries and does not use the json manifest files used
-by the Windows and Linux loaders.
 
 <br/>
 
@@ -1743,3 +1365,488 @@ To fill in the dispatch table pointer in newly created dispatchable object,
 the layer should copy the dispatch pointer, which is always the first entry in the structure, from an existing parent object of the same level (instance versus
 device). For example, if there is a newly created VkCommandBuffer object, then the dispatch pointer from the VkDevice object, which is the parent of the VkCommandBuffer object, should be copied into the newly created object.
 
+<br/>
+
+## Vulkan Installable Client Driver interface with the loader
+
+### ICD discovery
+
+Vulkan allows multiple drivers each with one or more devices (represented by a
+Vulkan VkPhysicalDevice object) to be used collectively. The loader is
+responsible for discovering available Vulkan ICDs on the system. Given a list
+of available ICDs, the loader can enumerate all the physical devices available
+for an application and return this information to the application. The process
+in which the loader discovers the available Installable Client Drivers (ICDs)
+on a system is platform dependent. Windows, Linux and Android ICD discovery
+details are listed below.
+
+#### Windows
+
+##### Properly-Installed ICDs
+
+In order to find properly-installed ICDs, the Vulkan loader will scan the
+values in the following Windows registry key:
+
+HKEY\_LOCAL\_MACHINE\\SOFTWARE\\Khronos\\Vulkan\\Drivers
+
+On 64-bit Windows, when a 32-bit application is triggered, the loader
+will scan for 32-bit drivers in a separate area of the registry:
+
+HKEY\_LOCAL\_MACHINE\\SOFTWARE\\WOW6432Node\\Khronos\\Vulkan\\Drivers
+
+For each value in this key which has DWORD data set to 0, the loader opens the
+JSON format text information file (a.k.a. "manifest file") specified by the
+name of the value. Each name must be a full pathname to the text manifest file.
+The Vulkan loader will open each manifest file to obtain the name or pathname
+of an ICD shared library (".dll") file. For example:
+
+ ```
+ {
+    "file_format_version": "1.0.0",
+    "ICD": {
+        "library_path": "path to ICD library",
+        "api_version": "1.0.5"
+    }
+  }
+  ```
+
+
+The "library\_path" specifies either a filename, a relative pathname, or a full
+pathname to an ICD shared library file, which the loader will attempt to load
+using LoadLibrary(). If the ICD is specified via a filename, the shared library
+lives in the system's DLL search path (e.g. in the "C:\Windows\System32"
+folder). If the ICD is specified via a relative pathname, it is relative to the
+path of the manifest file. Relative pathnames are those that do not start with
+a drive specifier (e.g. "C:"), nor with a directory separator (i.e. the '\\'
+character), but do contain at least one directory separator.
+
+The "file\_format\_version" specifies a major.minor.patch version number in
+case the format of the text information file changes in the future. If the same
+ICD shared library supports multiple, incompatible versions of text manifest
+file format versions, it must have separate JSON files for each (all of which may
+point to the same shared library).
+
+The "api\_version" specifies the major.minor.patch version number of the Vulkan
+API that the shared library (referenced by "library\_path") was built with.
+
+There are no rules about the name of the text information files (except the
+.json suffix).
+
+There are no rules about the name of the ICD shared library files. For example,
+if the registry contains the following values,
+
+```
+[HKEY_LOCAL_MACHINE\SOFTWARE\Khronos\Vulkan\Drivers\]
+
+"C:\vendor a\vk_vendora.json"=dword:00000000
+
+"C:\windows\system32\vendorb_vk.json"=dword:00000000
+
+"C:\windows\system32\vendorc_icd.json"=dword:00000000
+```
+then the loader will open the following text information files, with the
+specified contents:
+
+| Text File Name | Text File Contents |
+|----------------|--------------------|
+|vk\_vendora.json  | "ICD": { "library\_path": "C:\VENDOR A\vk_vendora.dll", "api_version": "1.0.5" } |
+| vendorb\_vk.json |  "ICD": { "library\_path": "vendorb\_vk.dll", "api_version": "1.0.5" } |
+|vendorc\_icd.json  | "ICD": { "library\_path": "vedorc\_icd.dll", "api_version": "1.0.5" }|
+
+Then the loader will open the three files mentioned in the "Text File Contents"
+column, and then try to load and use the three shared libraries indicated by
+the ICD.library\_path value.
+
+##### Using Pre-Production ICDs
+
+IHV developers (and sometimes other developers) need to use special,
+pre-production ICDs. In some cases, a pre-production ICD may be in an
+installable package. In other cases, a pre-production ICD may simply be a
+shared library in the developer's build tree. In this latter case, we want to
+allow developers to point to such an ICD without modifying the
+properly-installed ICD(s) on their system.
+
+This need is met with the use of the "VK\_ICD\_FILENAMES" environment variable,
+which will override the mechanism used for finding properly-installed ICDs. In
+other words, only the ICDs listed in "VK\_ICD\_FILENAMES" will be used. The
+"VK\_ICD\_FILENAMES" environment variable is a semi-colon-separated list of ICD
+text information files (aka manifest files), containing the following:
+
+- A full pathname (e.g. "C:\\my\_build\\my\_icd.json")
+
+Typically, "VK\_ICD\_FILENAMES" will only contain a full pathname to one info
+file for a developer-built ICD. A semi-colon is only used if more than one ICD
+is listed.
+
+For example, if a developer wants to refer to one ICD that they built, they
+could set the "VK\_ICD\_FILENAMES" environment variable to:
+
+C:\\my\_build\\my\_icd.json
+
+If a developer wants to refer to two ICDs, one of which is a properly-installed
+ICD, they can use the full pathname of the text file:
+
+C:\\Windows\\System32\\vendorc\_icd.json;C:\\my\_build\\my\_icd.json
+
+Notice the semi-colon between "C:\\Windows\\System32\\vendorc\_icd.json" and
+"C:\\my\_build\\my\_icd.json".
+
+#### Linux
+
+##### Properly-Installed ICDs
+
+In order to find properly-installed ICDs, the Vulkan loader will scan the files
+in the following Linux directories:
+
+```
+    /usr/local/etc/vulkan/icd.d
+    /usr/local/share/vulkan/icd.d
+    /etc/vulkan/icd.d
+    /usr/share/vulkan/icd.d
+    $HOME/.local/share/vulkan/icd.d
+```
+
+The "/usr/local/*" directories can be configured to be other directories at build time.
+
+Where $HOME is the current home directory of the application's user id; this
+path will be ignored for suid programs.
+
+These directories will contain text information files (a.k.a. "manifest
+files"), that use a JSON format.
+
+The Vulkan loader will open each manifest file found to obtain the name or
+pathname of an ICD shared library (".so") file. For example:
+
+```
+{
+    "file_format_version": "1.0.0",
+    "ICD": {
+        "library_path": "path to ICD library",
+        "api_version": "1.0.5"
+    }
+}
+```
+The "library\_path" specifies either a filename, a relative pathname, or a full
+pathname to an ICD shared library file. If the ICD is specified via a filename,
+the loader will attempt to open that file as a shared object using dlopen(),
+and the file must be in a directory that dlopen is configured to look in (Note:
+various distributions are configured differently). A distribution is free to
+create Vulkan-specific system directories (e.g. ".../vulkan/icd"), but is not
+required to do so. If the ICD is specified via a relative pathname, it is
+relative to the path of the info file. Relative pathnames are those that do not
+start with, but do contain at least one directory separator (i.e. the '/'
+character). For example, "lib/vendora.so" and "./vendora.so" are examples of
+relative pathnames.
+
+The "file\_format\_version" provides a major.minor.patch version number in case
+the format of the manifest file changes in the future. If the same ICD shared
+library supports multiple, incompatible versions of manifest file format
+versions, it must have multiple manifest files (all of which may point to the
+same shared library).
+
+The "api\_version" specifies the major.minor.patch version number of the Vulkan
+API that the shared library (referenced by "library\_path") was built with.
+
+The "/usr/local/etc/vulkan/icd.d" and "/usr/local/share/vulkan/icd.d"
+directories are for locally-built ICDs.
+
+The "/etc/vulkan/icd.d" directory is for
+ICDs that are installed from non-Linux-distribution-provided packages.
+
+The "/usr/share/vulkan/icd.d" directory is for ICDs that are installed from
+Linux-distribution-provided packages. 
+
+There are no rules about the name of the text files (except the .json suffix).
+
+There are no rules about the name of the ICD shared library files. For example,
+if the "/usr/share/vulkan/icd.d" directory contain the following files, with
+the specified contents:
+
+| Text File Name    | Text File Contents     |
+|-------------------|------------------------|
+| vk\_vendora.json | "ICD": { "library\_path": "vendora.so", "api_version": "1.0.5" } |
+| vendorb\_vk.json | "ICD": { "library\_path": "vendorb\_vulkan\_icd.so", "api_version": "1.0.5" } |
+| vendorc\_icd.json | "ICD": { "library\_path": "/usr/lib/VENDORC/icd.so", "api_version": "1.0.5" } |
+
+then the loader will open the three files mentioned in the "Text File Contents"
+column, and then try to load and use the three shared libraries indicated by
+the ICD.library\_path value.
+
+##### Using Pre-Production ICDs
+
+IHV developers (and sometimes other developers) need to use special,
+pre-production ICDs. In some cases, a pre-production ICD may be in an
+installable package. In other cases, a pre-production ICD may simply be a
+shared library in the developer's build tree. In this latter case, we want to
+allow developers to point to such an ICD without modifying the
+properly-installed ICD(s) on their system.
+
+This need is met with the use of the "VK\_ICD\_FILENAMES" environment variable,
+which will override the mechanism used for finding properly-installed ICDs. In
+other words, only the ICDs listed in "VK\_ICD\_FILENAMES" will be used.
+
+The "VK\_ICD\_FILENAMES" environment variable is a colon-separated list of ICD
+manifest files, containing the following:
+
+- A filename (e.g. "libvkicd.json") in the
+"/usr/local/etc/vulkan/icd.d",
+"/usr/local/share/vulkan/icd.d",
+"/etc/vulkan/icd.d",
+"/usr/share/vulkan/icd.d",
+"$HOME/.local/share/vulkan/icd.d"
+directories
+
+- A full pathname (e.g. "/my\_build/my\_icd.json")
+
+Typically, "VK\_ICD\_FILENAMES" will only contain a full pathname to one info
+file for a developer-built ICD. A colon is only used if more than one ICD is
+listed.
+
+For example, if a developer wants to refer to one ICD that they built, they
+could set the "VK\_ICD\_FILENAMES" environment variable to:
+
+/my\_build/my\_icd.json
+
+If a developer wants to refer to two ICDs, one of which is a properly-installed
+ICD, they can use the name of the text file in the system directory:
+
+vendorc\_vulkan.json:/my\_build/my\_icd.json
+
+Notice the colon between "vendorc\_vulkan.json" and "/my\_build/my\_icd.json".
+
+NOTE: this environment variable will be ignored for suid programs.
+
+#### Android
+
+The Android loader lives in the system library folder. The location cannot be
+changed. The loader will load the driver/ICD via hw_get_module with the ID
+of "vulkan". Due to security policies in Android none of this can be modified
+under normal use.
+
+<br/>
+
+## ICD interface requirements ##
+
+Generally, for all Vulkan commands issued by an application, the loader can be
+viewed as a pass through. That is, the loader generally doesn't modify the
+commands or their parameters, but simply calls the ICDs entry point for that
+command. There are specific additional interface requirements an ICD needs to comply with that
+are over and above any requirements from the Vulkan specification including WSI extension specification.
+These addtional requirements are versioned to allow flexibility in the future.
+These interface requirements will be set forth in the following sections: 1) describing
+which "loader-ICD" interface version is available, 2) detailing the most recent interface version;
+3) the supported, older interface requirements will be described as differences
+from the most recent interface version.
+
+#### Windows and Linux
+
+##### Version Negotiation Between Loader and ICDs
+
+All ICDs (supporting interface version 2 or higher) must export the following
+function that is used for determination of the interface version that will be used.
+This entry point is not a part of the Vulkan API itself, only a private interface
+between the loader and ICDs.
+
+VKAPI_ATTR VkResult VKAPI_CALL vk_icdNegotiateLoaderICDInterfaceVersion(uint32_t* pSupportedVersion);
+
+This entry point reports the "loader-ICD" interface version supported by both the loader and the ICD.
+The loader informs the ICD of it's desired interface version (typically the latest) via the
+pSupportedVersion parameter.
+This call is the first call made by the loader into the ICD  (prior to any calls to
+vk\_icdGetInstanceProcAddr).
+
+If a loader sees that an ICD does not export this symbol it knows that it's dealing
+with a legacy ICD supporting either interface version 0 or 1.
+Similarly, if an ICD sees a call to vk\_icdGetInstanceProcAddr before a call to
+vk_icdGetLoaderICDInterfaceVersion then it knows that it's dealing with a legacy loader
+supporting version 0 or 1.
+**Note** if the loader calls vk\_icdGetInstanceProcAddr first it supports at least version 1,
+otherwise the loader only supports version 0.
+
+The pSupportedVersion parameter is both an input and output parameter.
+It is filled in by the loader before the call with the desired latest interface version supported by the loader.
+
+If the ICD receiving the call no longer supports the interface version provided
+by the loader (due to deprecation) then it can report VK_ERROR_INCOMPATIBLE_DRIVER error,
+otherwise it sets the value pointed by pSupportedVersion to the latest interface
+version supported by both the ICD and the loader and returns VK_SUCCESS.
+The ICD should report VK_SUCCESS in case the loader provided interface version
+is newer than that supported by the ICD, as it's the loader's responsibility to
+determine whether it can support the older interface version supported by the ICD.
+The ICD should also report VK_SUCCESS in the case it's interface version is greater
+than the loader's, but return the loader's version. Thus, upon return of VK_SUCCESS
+the pSupportedVersion will contain the desired interface version to be used by the ICD.
+
+If the loader receives back an interface version from the ICD that the loader no longer
+supports (due to deprecation) or it receives a VK_ERROR_INCOMPATIBLE_DRIVER error
+instead of VK_SUCCESS then the loader will treat the ICD as incompatible
+and will not load it for use.  In this case the application will not see the ICDs vkPhysicalDevice
+during enumeration.
+
+##### Loader Version 3 Interface Changes
+
+The primary change occuring in version 3 of the loader/ICD interface is to allow an ICD to
+handle Creation/Destruction of their own KHR_surfaces.  Up until this point, the loader created
+a surface object that was used by all ICDs.  However, some ICDs may want to provide their
+own surface handles.  If an ICD chooses to enable this support, they must export support for
+version 3 of the Loader/ICD interface as well as any Vulkan command that uses a KHR_surface handle,
+such as:
+- vkCreateXXXSurfaceKHR (where XXX is the platform specific identifier [i.e.CreateWin32SurfaceKHR for Windows])
+- vkDestroySurfaceKHR
+- vkCreateSwapchainKHR
+- vkGetPhysicalDeviceSurfaceSupportKHR
+- vkGetPhysicalDeviceSurfaceCapabilitiesKHR
+- vkGetPhysicalDeviceSurfaceFormatsKHR
+- vkGetPhysicalDeviceSurfacePresentModesKHR
+
+An ICD can still choose to not take advantage of this functionality by simply not exposing the
+above the vkCreateXXXSurfaceKHR and vkDestroySurfaceKHR commands.
+
+##### Loader Version 2 Interface Requirements
+
+Version 2 interface has requirements in three areas:
+ 1. ICD Vulkan entry point discovery,
+ 2. KHR_surface related requirements in the WSI extensions,
+ 3. Vulkan dispatchable object creation requirements.
+
+######  ICD Vulkan entry point discovery
+All ICDs must export the following function that is used for discovery of ICD Vulkan entry points.
+This entry point is not a part of the Vulkan API itself, only a private interface between the loader and ICDs for version 1 and higher interfaces.
+
+VKAPI\_ATTR PFN\_vkVoidFunction VKAPI\_CALL vk\_icdGetInstanceProcAddr(VkInstance instance, const char* pName);
+
+This function has very similar semantics to the Vulkan command vkGetInstanceProcAddr.
+vk\_icdGetInstanceProcAddr returns valid function pointers for all the global level
+and instance level Vulkan commands, and also for vkGetDeviceProcAddr.
+Global level commands are those
+which contain no dispatchable object as the first parameter, such as
+vkCreateInstance and vkEnumerateInstanceExtensionProperties. The ICD must
+support querying global level entry points by calling
+vk\_icdGetInstanceProcAddr with a NULL VkInstance parameter. Instance level
+commands are those that have either VkInstance, or VkPhysicalDevice as the
+first parameter dispatchable object. Both core entry points and any instance
+extension entry points the ICD supports should be available via
+vk\_icdGetInstanceProcAddr. Future Vulkan instance extensions may define and
+use new instance level dispatchable objects other than VkInstance and
+VkPhysicalDevice, in which case extension entry points using these newly
+defined dispatchable objects must be queryable via vk\_icdGetInstanceProcAddr.
+
+All other Vulkan entry points must either NOT be exported from the ICD
+library or else NOT use the official Vulkan function names if they are
+exported. This requirement is for ICD libraries that include other
+functionality (such as OpenGL library) and thus could be loaded by the
+application prior to when the Vulkan loader library is loaded by the
+application. In other words, the ICD library exported Vulkan symbols must not
+clash with the loader's exported Vulkan symbols.
+
+Beware of interposing by dynamic OS library loaders if the official Vulkan
+names are used. On Linux, if official names are used, the ICD library must be
+linked with -Bsymbolic.
+
+###### Handling KHR_surface objects in the WSI extensions
+Normally, ICDs handle object creation and destruction for various Vulkan
+objects. The WSI surface extensions for Linux and Windows
+(VK\_KHR\_win32\_surface, VK\_KHR\_xcb\_surface, VK\_KHR\_xlib\_surface,
+VK\_KHR\_mir\_surface, VK\_KHR\_wayland\_surface, and VK\_KHR\_surface) are
+handled differently. For these extensions, the VkSurfaceKHR object creation and
+destruction is handled by the loader as follows:
+
+1. Loader handles the vkCreate\*SurfaceKHR() and vkDestroySurfaceKHR()
+   functions including creating/destroying the VkSurfaceKHR object.
+
+2. VkSurfaceKHR objects have the underlying structure (VkIcdSurface\*) as
+   defined in include/vulkan/vk\_icd.h.
+
+3. ICDs can cast any VkSurfaceKHR object to a pointer to the appropriate
+   VkIcdSurface\* structure.
+
+4. VkIcdSurface\* structures include VkIcdSurfaceWin32, VkIcdSurfaceXcb,
+   VkIcdSurfaceXlib, VkIcdSurfaceMir, and VkIcdSurfaceWayland. The first field
+   in the structure is a VkIcdSurfaceBase enumerant that indicates whether the
+   surface object is Win32, Xcb, Xlib, Mir, or Wayland.
+
+###### ICD dispatchable object creation
+As previously covered, the loader requires dispatch tables to be accessible
+within Vulkan dispatchable objects, which include VkInstance, VkPhysicalDevice,
+VkDevice, VkQueue, and VkCommandBuffer. The specific requirements on all
+dispatchable objects created by ICDs are as follows:
+
+- All dispatchable objects created by an ICD can be cast to void \*\*
+
+- The loader will replace the first entry with a pointer to the dispatch table
+  which is owned by the loader. This implies three things for ICD drivers:
+
+1. The ICD must return a pointer for the opaque dispatchable object handle.
+
+2. This pointer points to a regular C structure with the first entry being a
+   pointer. Note: for any C\++ ICD's that implement VK objects directly as C\++
+   classes. The C\++ compiler may put a vtable at offset zero if your class is
+   non-POD due to the use of a virtual function. In this case use a regular C
+   structure (see below).
+
+3. The loader checks for a magic value (ICD\_LOADER\_MAGIC) in all the created
+   dispatchable objects, as follows (see include/vulkan/vk\_icd.h):
+
+```
+
+#include "vk_icd.h"
+
+union _VK_LOADER_DATA {
+    uintptr loadermagic;
+    void *loaderData;
+} VK_LOADER_DATA;
+
+vkObj alloc_icd_obj()
+{
+    vkObj *newObj = alloc_obj();
+    ...
+    // Initialize pointer to loader's dispatch table with ICD_LOADER_MAGIC
+
+    set_loader_magic_value(newObj);
+    ...
+    return newObj;
+}
+```
+
+##### Loader Version 0 and 1 Interface Differences
+
+Version 0 and 1 interfaces do not support version negotiation via vk\_icdNegotiateLoaderICDInterfaceVersion.
+ICDs can distinguish version 0 and version 1 interfaces as follows:
+if the loader calls vk\_icdGetInstanceProcAddr first it supports version 1,
+otherwise the loader only supports version 0.
+
+Version 0 interface does not support vk\_icdGetInstanceProcAddr.  Version 0 interface requirements for
+obtaining ICD Vulkan entry points are as follows:
+
+- vkGetInstanceProcAddr exported in the ICD library and returns valid function
+  pointers for all the Vulkan API entry points;
+
+- vkCreateInstance exported in the ICD library;
+
+- vkEnumerateInstanceExtensionProperties exported in the ICD library;
+
+
+Additional Notes:
+
+- The loader will filter out extensions requested in vkCreateInstance and
+vkCreateDevice before calling into the ICD; Filtering will be of extensions
+advertised by entities (e.g. layers) different from the ICD in question.
+- The loader will not call the ICD for vkEnumerate\*LayerProperties() as layer
+properties are obtained from the layer libraries and layer JSON files.
+- If an ICD library wants to implement a layer it can do so by having the
+appropriate layer JSON manifest file refer to the ICD library file.
+- The loader will not call the ICD for
+  vkEnumerate\*ExtensionProperties(pLayerName != NULL).
+- ICDs creating new dispatchable objects via device extensions need to initialize
+the created dispatchable object.  The loader has generic trampoline code for unknown
+device extensions.  This generic trampoline code doesn't initialize the dispatch table within
+the newly created object.  See the section for more information on how to initialize created
+dispatchable objects for extensions non known by the loader. [layer link](#creating-new-dispatchable-objects)
+
+#### Android
+
+The Android loader uses the same protocol for initializing the dispatch
+table as described above. The only difference is that the Android
+loader queries layer and extension information directly from the
+respective libraries and does not use the json manifest files used
+by the Windows and Linux loaders.
