@@ -8,6 +8,13 @@
   * [Vulkan Direct Exports](#vulkan-direct-exports)
   * [Indirectly Linking to the Loader](#indirectly-linking-to-the-loader)
   * [ABI Versioning](#abi-versioning)
+  * [Application Layer Usage](#application-layer-usage)
+    * [Forcing Layers to be Enabled](#forcing-layers-to-be-enabled)
+    * [Implicit vs Explicit Layers](#implicit-vs-explicit-layers)
+    * [Overall Layer Ordering](#overall-layer-ordering)
+  * [Application Usage of Extensions](#application-usage-of-extensions)
+    * [Instance and Device Extensions](#instance-and-device-extensions)
+    * [Querying Extension Commands](#querying-instance-commands)
  * [Architectural overview of layers and loader](#architectural-overview-of-layers-and-loader)
  * [Vulkan Installable Client Driver interface with the loader](#vulkan-installable-client-driver-interface-with-the-loader)
  * [ICD interface requirements](#icd-interface-requirements)
@@ -22,7 +29,7 @@ Vulkan is a layered architecture, made up of the following elements:
  * Vulkan Layers
  * Vulkan-capable hardware controlled via Installable Client Drivers (ICDs)
 
-![High Level View of Loader](high_level_loader.png)
+![High Level View of Loader](./images/high_level_loader.png)
 
 As you can see, the application sits on one end, and interfaces directly to the loader.
 The loader itself can contain some number of layers, which provide special
@@ -31,7 +38,7 @@ end of the loader from the application are the ICDs, which control the Vulkan-ca
 hardware.  An important point to remember is that Vulkan-capable hardware can be
 graphics-based, compute-based, or both.
 
-As you can see, the Vulkan loader is a critical part of the Vulkan ecosystem,
+Because of this, the Vulkan loader is a critical part of the Vulkan ecosystem,
 acting as the mediator between these applications, layers, and ICDs.  This document
 is intended to provide an overview of the necessary interfaces between each of these.
 
@@ -55,11 +62,16 @@ developer.
 ## Application Interface to the Loader
 
 In this section we'll discuss how an application interacts with the loader, including:
- * Linking to the loader.
- * Dynamic Vulkan command look-up for anything not directly exported by the loader.
- * Linking to different Vulkan ABI versions.
- * Interacting with layers
- * Enabling Vulkan extensions
+ * [Vulkan Direct Exports](#vulkan-direct-exports)
+ * [Indirectly Linking to the Loader](#indirectly-linking-to-the-loader)
+ * [ABI Versioning](#abi-versioning)
+ * [Application Layer Usage](#application-layer-usage)
+  * [Forcing Layers to be Enabled](#forcing-layers-to-be-enabled)
+  * [Implicit vs Explicit Layers](#implicit-vs-explicit-layers)
+  * [Overall Layer Ordering](#overall-layer-ordering)
+ * [Application Usage of Extensions](#application-usage-of-extensions)
+  * [Instance and Device Extensions](#instance-and-device-extensions)
+  * [Querying Extension Commands](#querying-instance-commands)
 
 #### Vulkan Direct Exports
 The loader library on Windows, Linux and Android will export all core Vulkan
@@ -103,49 +115,94 @@ Linux an application wanting to link to the latest Vulkan ABI version would
 just link to the name vulkan (libvulkan.so).  A specific Vulkan ABI version can
 also be linked to by applications (e.g. libvulkan.so.1).
 
-#### Layer Usage
+#### Application Layer Usage
 
 Applications desiring Vulkan functionality beyond what the core API offers may
 use various layers or extensions. A layer cannot introduce new Vulkan API
-entry-points not exposed in Vulkan.h, but may offer extensions that do. A
-common use of layers is for API validation which can be enabled by loading the
-layer during application development, but not loading the layer for application
-release. This eliminates the overhead of validating the application's
-usage of the API, something that wasn't available on some previous graphics
-APIs.
+entry-points to an application not exposed in Vulkan.h, but may offer extensions
+that do. A common use of layers is for API validation which can be enabled by
+loading the layer during application development, but not loading the layer
+for application release. This eliminates the overhead of validating the
+application's usage of the API, something that wasn't available on some previous
+graphics APIs.
 
-Layers discovered by the loader are reported to the application via
-vkEnumerateInstanceLayerProperties.  Layers are enabled at vkCreateInstance
-and are active for all Vulkan commands using the given VkInstance and any
-of it's child objects.  For example, the ppEnabledLayerNames array in the
-VkInstanceCreateInfo structure is used by the application to list the layer
-names to be enabled at vkCreateInstance. At vkCreateInstance and
-vkCreateDevice, the loader will construct call chains that include the application
-specified (enabled) layers.  Order is important in the
-ppEnabledLayerNames array; array element 0 is the topmost (closest to the
+To find out what layers are available to your application, use the
+`vkEnumerateInstanceLayerProperties` command.  This will report all layers
+that have been discovered by the loader.  The loader looks in various locations
+to find layers on the system.  For more information see the
+[Layer discovery](#layer-discovery) section below.
+
+To enable a layer, or layers, simply pass the name of the layers you wish to
+enable in the `ppEnabledLayerNames` field of the `VkInstanceCreateInfo` during
+a call to `vkCreateInstance`.  Once done, the layers you have enabled will be
+active for all Vulkan commands using the created `VkInstance`, and any of
+its child objects.
+
+**NOTE:** Layer ordering is important in several cases since some layers
+interact with each other.  Be careful when enabling layers as this may be
+the case.
+
+The following code section shows how you would go about enabling the
+VK_LAYER_LUNARG_standard_validation layer.
+
+```
+   char *instance_validation_layers[] = {
+        "VK_LAYER_LUNARG_standard_validation"
+    };
+    const VkApplicationInfo app = {
+        .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
+        .pNext = NULL,
+        .pApplicationName = "TEST_APP",
+        .applicationVersion = 0,
+        .pEngineName = "TEST_ENGINE",
+        .engineVersion = 0,
+        .apiVersion = VK_API_VERSION_1_0,
+    };
+    VkInstanceCreateInfo inst_info = {
+        .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
+        .pNext = NULL,
+        .pApplicationInfo = &app,
+        .enabledLayerCount = 1,
+        .ppEnabledLayerNames = (const char *const *)instance_validation_layers,
+        .enabledExtensionCount = 0,
+        .ppEnabledExtensionNames = NULL,
+    };
+    err = vkCreateInstance(&inst_info, NULL, &demo->inst);
+```
+
+At `vkCreateInstance` and `vkCreateDevice`, the loader constructs call chains that
+include the application specified (enabled) layers.  Order is important in the
+`ppEnabledLayerNames` array; array element 0 is the topmost (closest to the
 application) layer inserted in the chain and the last array element is closest
 to the driver.
 
-**NOTE**: vkCreateDevice originally was able to select layers in a
-similar manner to vkCreateInstance.  This lead to the concept of "instance
-layers" and "device layers".  It was decided by Khronos to deprecate the
-"device layer" functionality and only consider "instance layers".
-Therefore, vkCreateDevice will use the layers specified at vkCreateInstance.
-Additionally, vkEnumerateDeviceLayerProperties has been deprecated.  
+**NOTE:** *Device Layers Are Now Deprecated*
+> `vkCreateDevice` originally was able to select layers in a similar manner to
+> `vkCreateInstance`.  This lead to the concept of "instance
+> layers" and "device layers".  It was decided by Khronos to deprecate the
+> "device layer" functionality and only consider "instance layers".
+> Therefore, `vkCreateDevice` will use the layers specified at `vkCreateInstance`.
+> Because of this, the following items have been deprecated:
+> * `VkDeviceCreateInfo` fields:
+>  * `ppEnabledLayerNames`
+>  * `enabledLayerCount`
+> * `vkEnumerateDeviceLayerProperties`
+
+
+##### Forcing Layers to be Enabled
 
 Developers may want to enable layers that are not enabled by the given
 application they are using. On Linux and Windows, the environment variable
-"VK\_INSTANCE\_LAYERS" can be used to enable
-additional layers which are not specified (enabled) by the application at
-vkCreateInstance. VK\_INSTANCE\_LAYERS is a colon
-(Linux)/semi-colon (Windows) separated list of layer names to enable. Order is
-relevant with the first layer in the list being the topmost layer (closest to
-the application) and the last layer in the list being the bottommost layer
-(closest to the driver).
+"VK\_INSTANCE\_LAYERS" can be used to enable additional layers which are
+not specified (enabled) by the application at `vkCreateInstance`.
+VK\_INSTANCE\_LAYERS is a colon (Linux)/semi-colon (Windows) separated
+list of layer names to enable. Order is relevant with the first layer in the
+list being the top-most layer (closest to the application) and the last
+layer in the list being the bottom-most layer (closest to the driver).
 
 Application specified layers and user specified layers (via environment
 variables) are aggregated and duplicates removed by the loader when enabling
-layers. Layers specified via environment variable are topmost (closest to the
+layers. Layers specified via environment variable are top-most (closest to the
 application) while layers specified by the application are bottommost.
 
 An example of using these environment variables to activate the validation
@@ -155,7 +212,7 @@ layer VK\_LAYER\_LUNARG\_parameter\_validation on Windows or Linux is as follows
 > $ export VK_INSTANCE_LAYERS=VK_LAYER_LUNARG_parameter_validation
 ```
 
-#### Implicit vs Explicit Layers
+##### Implicit vs Explicit Layers
 
 Some platforms, including Linux and Windows, support layers which are enabled
 automatically by the loader rather than explicitly by the application (or via
@@ -176,26 +233,68 @@ environment variable so the users can deterministicly enable the functionality.
 On Desktop platforms (Windows and Linux), these enable/disable settings are
 defined in the layer's JSON file.
 
+##### Overall Layer Ordering
+
+The overall ordering of all layers by the loader based on the above looks
+as follows:
+
+![Loader Layer Ordering](./images/loader_layer_order.png)
+
+#### Application Usage of Extensions
+
 Extensions are optional functionality provided by a layer, the loader or an
 ICD. Extensions can modify the behavior of the Vulkan API and need to be
-specified and registered with Khronos.
+specified and registered with Khronos.  These extensions can be created
+by an Independent Hardware Vendor (IHV) to expose new hardware functionality,
+or by a layer writer to expose some internal feature, or by the loader to
+improve functional behavior.  Information about various extensions can be
+found in the Vulkan Spec, and vulkan.h header file.
 
-#### Instance/Device Extensions
+##### Instance and Device Extensions
 
-Instance extensions can be discovered via
-vkEnumerateInstanceExtensionProperties. Device extensions can be discovered via
-vkEnumerateDeviceExtensionProperties. The loader discovers and aggregates all
+There are really two types of extensions:
+ * Instance Extensions
+ * Device Extensions
+
+The description of each is pretty obvious.  An Instance extension is an
+extension which modifies existing behavior or implements new behavior on
+Instance level objects, like a `VkInstance` or a `VkPhysicalDevice`.  A Device
+extension is an extension which does the same, but for any `VkDevice` object,
+or any dispatchable object that is a child of a `VkDevice` (`VkQueue` and
+`VkCommandBuffer` are examples of these).  It is **very** important to
+know what type of extension you are desiring to enable as you will enable
+Instance extensions during `vkCreateInstance` and Device extensions during
+`vkCreateDevice`.
+
+The loader discovers and aggregates all
 extensions from layers (both explicit and implicit), ICDs and the loader before
-reporting them to the application in vkEnumerate\*ExtensionProperties. The
-pLayerName parameter in these functions is used to select either a single layer
+reporting them to the application in vkEnumerate\*ExtensionProperties. 
+ - Instance extensions are discovered via `vkEnumerateInstanceExtensionProperties`.
+ - Device extensions are be discovered via `vkEnumerateDeviceExtensionProperties`.
+
+Looking at vulkan.h, you'll notice that they are both similar.  For example,
+`vkEnumerateInstanceExtensionProperties` prototype looks as follows:
+
+```
+   VkResult
+   vkEnumerateInstanceExtensionProperties(const char *pLayerName,
+                                          uint32_t *pPropertyCount,
+                                          VkExtensionProperties *pProperties);
+```
+
+The pLayerName parameter in these functions is used to select either a single layer
 or the Vulkan platform implementation. If pLayerName is NULL, extensions from
 Vulkan implementation components (including loader, implicit layers, and ICDs)
 are enumerated. If pLayerName is equal to a discovered layer module name then
-any extensions from that layer (which may be implicit or explicit) are
+only extensions from that layer (which may be implicit or explicit) are
 enumerated. Duplicate extensions (e.g. an implicit layer and ICD might report
 support for the same extension) are eliminated by the loader. For duplicates, the
-ICD version is reported and the layer version is culled. Extensions must
-be enabled (in vkCreateInstance or vkCreateDevice) before they can be used.
+ICD version is reported and the layer version is culled.
+
+**VERY IMPORTANT NOTE:**  Extensions *must be enabled* (in `vkCreateInstance` or
+`vkCreateDevice`) before they can be used.
+
+##### Querying Extension Commands
 
 Extension command entry points should be queried via vkGetInstanceProcAddr or
 vkGetDeviceProcAddr. vkGetDeviceProcAddr can only be used to query for device
