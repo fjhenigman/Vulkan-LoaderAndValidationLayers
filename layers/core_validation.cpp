@@ -5305,7 +5305,7 @@ VKAPI_ATTR void VKAPI_CALL GetDeviceQueue(VkDevice device, uint32_t queueFamilyI
     std::lock_guard<std::mutex> lock(global_lock);
 
     // Add queue to tracking set only if it is new
-    auto result = dev_data->queues.emplace(*pQueue);
+    auto result = dev_data->queues.insert(*pQueue);
     if (result.second == true) {
         QUEUE_NODE *pQNode = &dev_data->queueMap[*pQueue];
         pQNode->queue = *pQueue;
